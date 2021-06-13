@@ -1,0 +1,337 @@
+---
+title: "Predicting FlightDelays from Weather Forecasts"
+author: "Alan Fitzpatrick"
+date: "6/6/2021"
+output: pdf_document
+fontsize: 10pt
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1. Introduction
+This project will attempt to provide a framework with which to predict flight delays based on Weather forecasts.
+Although there are many potential causes of flight delays (mechanical problems, airport congestion etc), any regular air traveller knows that Weather is frequently reported as a cause of flight delays. I will attempt to determine the relationship betIen Weather and the average difference betIen scheduled arrival times and actual arrival times between two given airports.
+
+# 2. Background
+I will focus on the following Weather categories : Precipitation, Snow, Fog and Thunder. Although precipitation in itself does not cause significant delays, I will show that there is a high correlation betIen precipitation and delay times. This is likely due to the fact that precipitation is generally associated with low cloud and hence limited visibility. Snow, Fog and Thunder are generally significant contributors to flight delays.
+
+# 3. Methods
+I will use the following two methods to predict flight delays from weather patterns.
+Generalized Linear Model (GLM)
+K Nearest Neighbors (KNN)
+
+It is a assumed that the reader is familiar with these models. But to recap:  
+Linear regression attempts to find a linear relationship between a set of parameters and a dependent variable by minimizing the difference between the predicted value and actual value of the variable
+
+With KNN, given a set of values (eg weather measurements on a given day), we establish the K closest datapoints using the cartesian distance formula to determine closeness, and from these datapoints determine the value of the dependent variable.
+
+Note that KNN is designed to predict values for  categorical data rather than continuous quantities. But in order to use KNN, we can break the range of likely delays into 10 minute intervals. Then we can direct KNN to predict which 10 minute interval a flight would likely fall into.
+
+We split the data into an analysis set and a final validation set. The analysis set is further split into training and test sets in the ratio of 70% : 30%
+## 3.1 Source Data
+The project uses a dataset of flights within the US.
+IBM provides a file at the following page listing US domestic flights from 1987 to 2020.  
+https://developer.ibm.com/technologies/artificial-intelligence/data/airline/ 
+(File name is airline.csv)
+An in depth analysis could be done using the entire dataset. But for the purposes of this project (given that peer revieIrs will need to download the data and run the code within a reasonable timeframe), I will restrict the analysis to flights in 2015 between the following airports (with IATA code):
+
+ATL : Atlanta Hartsfield  
+DAL : Dallas Love Field  
+DCA : Washington Reagan National  
+JFK : New York JFK  
+LAX : Los Angeles International  
+ORD : Chicago O'Hare  
+
+A subset of the above 1987-2020 IBM dataset with data for 2015 can be found at the following location:  
+https://figshare.com/articles/dataset/flights_csv/9820139/1  
+(Filename is flights.csv)  
+
+I have filtered the 2015 dataset to only include flights betIen the above 6 airports. This dataset has been uploaded to the following location: 
+https://raw.githubusercontent.com/alanjfitz/datascience/main/all_flights.csv
+
+Weather data for the project was obtained from the US National Oceanic and Atmospheric Adminstration at the following location
+https://www.ncdc.noaa.gov/cdo-web/search?datasetid=GHCND
+This site allows the user to download weather datasets for a range of dates for many US locations. I downloaded weather data for the 6 above airport locations and combined the datasets into a single file available here :
+https://raw.githubusercontent.com/alanjfitz/datascience/main/allAirportsWeather_raw.csv  
+
+The weather dataset provides actual quantities in inches for Snow and overall precipitation. However for Thunder and Fog, we only have a boolean variable Y or N indicating whether there is Thunder and/or Fog at the given location.  
+
+Finally the following file contains a simple table with a cross-mapping of airport IATA codes with locations from the Weather dataset.
+https://raw.githubusercontent.com/alanjfitz/datascience/main/airports.csv
+
+The R code will combine the above datasets into a single dataset containing details of the weather for the origin and destination of each flight. Using this data, the goal is to establish a causal relationship between the weather readings and arrival delays for each airport.
+
+Although there are several flights per day between each pair of airports, we only have one weather record per day for each location. Therefore, it wouldn't make sense to treat each flight as a separate data point. Rather, we  take the average arrival delay for each route each day and use this for the analysis of the effect of weather on arrival times. 
+
+# R-Code
+```{r FlightDelays, message=FALSE,echo=FALSE, warning=FALSE}
+if(!require(readxl)) install.packages("readxl", repos = "http://cran.us.r-project.org")
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(gridExtra)) install.packages("gridExtra", repos = "http://cran.us.r-project.org")
+library(grid); library(gridExtra)
+```
+rmse function, which will be used to measure accuracy of the predicted results:
+```{r}
+rmse<-function(a,b) {
+  sqrt(mean((a-b)^2))
+}
+```
+flightpredDelayKNN function. We package this logic into a function so it can be called using sapply(), passing an array of k values so we can then determine the optimal k value. Knn returns an array of probabilities of different delay ranges.
+We will average these to get the expected delay.
+
+```{r}
+
+flightpredDelayKNN<-function(kVal) {
+  fit <-knn3(roundAverageDelayFactor ~ ORIG_AIRPORT+ DEST_AIRPORT+
+                        ORIG_PRCP_fact +
+                        ORIG_SNOW_fact + 
+                        ORIG_FOG_fact +
+                        ORIG_THUNDER_fact +
+                        DEST_PRCP_fact +
+                        DEST_SNOW_fact +
+                        DEST_FOG_fact +
+                        DEST_THUNDER_fact 
+                      ,data =flightsTrainKNN,
+                      k=kVal)
+  predDelayTestKNN<-predict(fit, flightsTestKNN)  
+  predDelayKNN<-predDelayTestKNN[,2]*10+predDelayTestKNN[,3]*20+predDelayTestKNN[,4]*30+predDelayTestKNN[,5]*40+predDelayTestKNN[,6]*50+predDelayTestKNN[,7]*60
+  results <- list(rmseVal=rmse(predDelayKNN, flightsTestKNN$averageDelay),
+                  fit=fit)
+  results
+  
+}
+```
+Download list of airports and weather for each airport. 
+Join the two datasets together.
+The following describes the columns we will use from the NOAA datafeed:  
+  PRCP: Precipitation  
+  SNOW: Snow  
+  SNWD: Snow Depth  
+  WT01: Fog  
+  WT03: Thunder  
+Replace any N/A values with 0.
+
+```{r}
+allAirports<-read.csv("https://raw.githubusercontent.com/alanjfitz/datascience/main/airports.csv")
+
+#allAirportsWeather_raw <-read.csv("C:\\TechStuff\\DataScience\\flightdelays\\data\\allAirportsWeather_raw.csv")
+allAirportsWeather_raw<- read.csv("https://raw.githubusercontent.com/alanjfitz/datascience/main/allAirportsWeather_raw.csv")
+
+allAirportsWeather_raw$DATE<-str_replace_all(allAirportsWeather_raw$DATE,"-","/") 
+allAirportsWeather<-  inner_join(allAirportsWeather_raw, allAirports, by=c("NAME"= "location")) %>%
+  select(airport=iataCode,DATE,PRCP=PRCP, SNOW=SNOW, SNWD=SNWD,FOG=WT01, THUNDER=WT03)
+
+allAirportsWeather$THUNDER[is.na(allAirportsWeather$THUNDER)]<-0
+allAirportsWeather$FOG[is.na(allAirportsWeather$FOG)]<-0
+allAirportsWeather$SNOW[is.na(allAirportsWeather$SNOW)]<-0
+allAirportsWeather$SNWD[is.na(allAirportsWeather$SNWD)]<-0
+
+
+#allFlightsRaw <-read.csv("C:\\TechStuff\\DataScience\\flightdelays\\data\\all_flights.csv")
+allFlightsRaw <-read.csv("https://raw.githubusercontent.com/alanjfitz/datascience/main/all_flights.csv")
+flightsRaw <-allFlightsRaw %>% filter(ORIGIN_AIRPORT %in% allAirports$iataCode & DESTINATION_AIRPORT %in% allAirports$iataCode )
+rm(allFlightsRaw)
+ flightsTemp<-flightsRaw %>% select (YEAR, MONTH, DAY, ORIG_AIRPORT=ORIGIN_AIRPORT, DEST_AIRPORT=DESTINATION_AIRPORT, ARRIVAL_DELAY)
+ flightsTemp <-flightsTemp %>% mutate(flightDate=paste( MONTH, DAY,YEAR, sep="/"))
+ flights <-left_join(flightsTemp ,allAirportsWeather,by=c("flightDate" = "DATE","ORIG_AIRPORT"="airport" )) %>%
+   select(flightDate,ORIG_AIRPORT, DEST_AIRPORT , ARRIVAL_DELAY,
+          ORIG_PRCP=PRCP, ORIG_SNOW=SNOW, ORIG_SNWD=SNWD,ORIG_FOG=FOG, ORIG_THUNDER=THUNDER) 
+
+ flights <-left_join(flights ,allAirportsWeather,by=c("flightDate" = "DATE","DEST_AIRPORT"="airport" )) %>%
+   select(flightDate,ORIG_AIRPORT, DEST_AIRPORT , ARRIVAL_DELAY,
+          ORIG_PRCP, ORIG_SNOW, ORIG_SNWD,ORIG_FOG, ORIG_THUNDER,
+          DEST_PRCP=PRCP, DEST_SNOW=SNOW, DEST_SNWD=SNWD,DEST_FOG=FOG, DEST_THUNDER=THUNDER) 
+
+ flights$ARRIVAL_DELAY[is.na(flights$ARRIVAL_DELAY)]<-0
+ 
+  graph_ORIG_PRCP<- flights %>% mutate(ORIG_PRCP_INT=round(ORIG_PRCP,1))%>%
+   group_by(ORIG_PRCP_INT) %>%
+    filter(n()>10) %>%
+    summarize(averageDelay=mean(ARRIVAL_DELAY))%>%
+   ggplot(aes(ORIG_PRCP_INT, averageDelay)) + geom_point() +
+    scale_x_continuous(trans='log10')+
+    xlab("Origin Precipitation *") + ylab ("Average Delay")
+
+  graph_DEST_PRCP<- flights %>% mutate(DEST_PRCP_INT=round(DEST_PRCP,1))%>%
+    group_by(DEST_PRCP_INT) %>%
+    filter(n()>10) %>%
+    summarize(averageDelay=mean(ARRIVAL_DELAY))%>%
+    ggplot(aes(DEST_PRCP_INT, averageDelay)) + geom_point() +
+    scale_x_continuous(trans='log10')+
+    xlab("Dest. Precipitation *") + ylab ("Average Delay")
+  
+  graph_ORIG_SNOW<- flights %>% mutate(ORIG_SNOW_INT=round(ORIG_SNOW),1)%>%
+    group_by(ORIG_SNOW_INT) %>%
+    filter(n()>=10) %>%
+    summarize(averageDelay=mean(ARRIVAL_DELAY))%>%
+    ggplot(aes(ORIG_SNOW_INT, averageDelay)) + geom_point() +
+    scale_x_continuous(trans='log10')+
+    xlab("Origin Snow *") + ylab ("Average Delay")
+  
+  graph_DEST_SNOW<- flights %>% mutate(DEST_SNOW_INT=round(DEST_SNOW),1)%>%
+    group_by(DEST_SNOW_INT) %>%
+    filter(n()>=10) %>%
+    summarize(averageDelay=mean(ARRIVAL_DELAY))%>%
+    ggplot(aes(DEST_SNOW_INT, averageDelay)) + geom_point() +
+    scale_x_continuous(trans='log10')+
+    xlab("Dest. Snow *") + ylab ("Average Delay")
+  
+  graph_ORIG_FOG<- flights %>% 
+    mutate(ORIG_FOG_INT=if_else(ORIG_FOG==1,  "Y", "N"))%>%
+    group_by(ORIG_FOG_INT) %>%
+    filter(n()>=10) %>%
+    summarize(averageDelay=mean(ARRIVAL_DELAY))%>%
+    ggplot(aes(ORIG_FOG_INT, averageDelay)) + geom_point() +
+    xlab("Origin Fog") + ylab ("Average Delay")
+  
+  graph_DEST_FOG<- flights %>% 
+    mutate(DEST_FOG_Y_N=if_else(ORIG_FOG==1,  "Y", "N"))%>%
+    group_by(DEST_FOG_Y_N) %>%
+    filter(n()>=10) %>%
+    summarize(averageDelay=mean(ARRIVAL_DELAY))%>%
+    ggplot(aes(DEST_FOG_Y_N, averageDelay)) + geom_point() +
+    xlab("Dest. Fog") + ylab ("Average Delay")
+  
+  graph_ORIG_THUNDER<- flights %>% 
+    mutate(ORIG_THUNDER_Y_N=if_else(ORIG_FOG==1,  "Y", "N"))%>%
+    group_by(ORIG_THUNDER_Y_N) %>%
+    filter(n()>=10) %>%
+    summarize(averageDelay=mean(ARRIVAL_DELAY))%>%
+    ggplot(aes(ORIG_THUNDER_Y_N, averageDelay)) + geom_point() +
+    xlab("Origin Thunder") + ylab ("Average Delay")
+  
+  graph_DEST_THUNDER<- flights %>% 
+    mutate(DEST_THUNDER_Y_N=if_else(ORIG_FOG==1,  "Y", "N"))%>%
+    group_by(DEST_THUNDER_Y_N) %>%
+    filter(n()>=10) %>%
+    summarize(averageDelay=mean(ARRIVAL_DELAY))%>%
+    ggplot(aes(DEST_THUNDER_Y_N, averageDelay)) + geom_point() +
+    xlab("Dest Thunder") + ylab ("Average Delay")
+  
+  
+ 
+  flightsSum <- flights %>% group_by (flightDate,ORIG_AIRPORT, DEST_AIRPORT) %>% 
+    summarize(averageDelay= mean(ARRIVAL_DELAY),
+                    roundAverageDelayFactor= 
+                      factor(pmax(pmin(round(mean(ARRIVAL_DELAY)/10)*10,60),0), 
+                             levels=c(0,10,20,30,40,50,60)),
+                      ORIG_PRCP=mean(ORIG_PRCP) ,
+                      ORIG_PRCP_fact=as.factor(mean(ORIG_PRCP) ),
+                      ORIG_SNOW=mean(ORIG_SNOW) ,
+                      ORIG_SNOW_fact=as.factor(mean(ORIG_SNOW) ),
+                      ORIG_FOG =mean(ORIG_FOG) ,
+                      ORIG_FOG_fact =as.factor(mean(ORIG_FOG)) ,
+                      ORIG_THUNDER =mean(ORIG_THUNDER),
+                      ORIG_THUNDER_fact =as.factor(mean(ORIG_THUNDER) ),
+                      DEST_PRCP =mean(DEST_PRCP),
+                      DEST_PRCP_fact =as.factor(mean(DEST_PRCP) ),
+                      DEST_SNOW =mean(DEST_SNOW) ,
+                      DEST_SNOW_fact =as.factor(mean(DEST_SNOW) ),
+                      DEST_FOG =mean(DEST_FOG),
+                      DEST_FOG_fact =as.factor(mean(DEST_FOG) ),
+                      DEST_THUNDER =mean(DEST_THUNDER ),
+                      DEST_THUNDER_fact =as.factor(mean(DEST_THUNDER) ))%>%
+
+ ungroup()
+ set.seed(1)
+ 
+valIndex <- createDataPartition(
+      y = flightsSum$roundAverageDelayFactor, times = 1, p = 0.3, list = FALSE)
+flightsAnalysis<-flightsSum[-valIndex,]
+flightsValidation<-flightsSum[valIndex,]
+
+testIndexKNN <- createDataPartition(
+      y = flightsAnalysis$roundAverageDelayFactor, times = 1, p = 0.3, list = FALSE)
+flightsTrainKNN<-flightsAnalysis[-testIndexKNN,]
+flightsTestKNN<-flightsAnalysis[testIndexKNN,]
+flightsTrainKNN<-as.data.frame(flightsTrainKNN)
+flightsTestKNN<-as.data.frame(flightsTestKNN)
+
+kArray<-seq(4,7)
+fitDelaysKNN<-sapply(kArray,flightpredDelayKNN)
+rmseArray<-unlist(fitDelaysKNN[1,])
+resultsKNN<-data.frame(kArray,rmseArray)
+
+bestK<-which.min(fitDelaysKNN[1,])
+bestK
+
+finalValpredDelayKNNCoeffs<-predict(fitDelaysKNN[2,bestK], flightsValidation)
+finalValpredDelayKNNCoeffs<-finalValpredDelayKNNCoeffs[[1]]
+flightsValidation$finalValpredDelayKNNCoeffs<-finalValpredDelayKNNCoeffs
+flightsValidation$finalValpredDelayKNN<-
+      finalValpredDelayKNNCoeffs[,2]*10+
+      finalValpredDelayKNNCoeffs[,3]*20+
+      finalValpredDelayKNNCoeffs[,4]*30+
+      finalValpredDelayKNNCoeffs[,5]*40+
+      finalValpredDelayKNNCoeffs[,6]*50+
+      finalValpredDelayKNNCoeffs[,7]*60
+cor (flightsValidation$finalValpredDelayKNN,flightsValidation$averageDelay)
+rmse (flightsValidation$finalValpredDelayKNN,flightsValidation$averageDelay)
+
+testIndexGLM <- createDataPartition(y = flightsAnalysis$roundAverageDelayFactor, 
+                                    times = 1, p = 0.3, list = FALSE)
+flightsTrainGLM<-flightsAnalysis[-testIndexGLM,]
+flightsTestGLM<-flightsAnalysis[testIndexGLM,]
+flightsTrainGLM<-as.data.frame(flightsTrainGLM)
+flightsTestGLM<-as.data.frame(flightsTestGLM)
+
+fitDelayGLM <-glm(averageDelay ~
+                    ORIG_AIRPORT+
+                    DEST_AIRPORT+
+                    ORIG_PRCP +
+                    ORIG_FOG +
+                    ORIG_THUNDER +
+                    DEST_PRCP +
+                    DEST_SNOW +
+                    DEST_FOG +
+                    DEST_THUNDER ,
+                  data =flightsTrainGLM)
+predDelayGLM<-predict(fitDelayGLM, flightsTestGLM)
+flightsTestGLM$predDelay<-predDelayGLM
+
+cor (flightsTestGLM$predDelay,flightsTestGLM$averageDelay)
+rmse (flightsTestGLM$predDelay,flightsTestGLM$averageDelay)
+
+```
+
+```{r fig.width=10, fig.height=15, warning=FALSE}
+
+grid.arrange(graph_ORIG_PRCP, 
+             graph_ORIG_SNOW,
+             graph_DEST_PRCP,
+             graph_DEST_SNOW, 
+             graph_ORIG_FOG,
+             graph_DEST_FOG,
+             graph_ORIG_THUNDER,
+             graph_DEST_THUNDER,
+             ncol = 2,
+             top = paste("Plot of average arrival delay vs weather type.",
+                         "* : implies log scale", sep="\n")
+             )
+
+```
+
+```{r fig.width=5, fig.height=5}
+
+
+resultsKNN %>% ggplot(aes(kArray, rmseArray)) + geom_point()
+
+```
+
+
+
+# 3. Analysis
+Analysis
+
+# 4. Conclusion
+Conclusion
+
+## Including Plots
+
+You can also embed plots, for example:
+
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
